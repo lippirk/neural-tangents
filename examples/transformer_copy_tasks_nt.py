@@ -21,48 +21,61 @@ from jax import random
 import jax.numpy as jnp
 import neural_tangents as nt
 from neural_tangents import stax
-
-import datasets
 import util
+import transformer_datasets as TD
 
 
-
-_TRAIN_SIZE = 300  # Dataset size to use for training.
-_TEST_SIZE = 300  # Dataset size to use for testing.
 _BATCH_SIZE = 15  # Batch size for kernel computation. 0 for no batching.
 _MAX_SENTENCE_LENGTH = 500  # Pad/truncate sentences to this length.
-_GLOVE_PATH = '/tmp/glove.6B.50d.txt'  # Path to GloVe word embeddings.
-_IMDB_PATH = '/tmp/imdb_reviews'  # Path to imdb sentences.
 
 
-def main(*args, use_dummy_data: bool = False, **kwargs) -> None:
+
+def get_task_data(task, level='easy', dataset_size: int=1000, mask_contstant=100.):
+    if level == 'easy':
+        num_letters = 8; max_input_len = 16
+    elif level == 'hard':
+        num_letters = 26; max_input_len = 32
+    if task == 'copy':
+        dataset = TD.CopyTaskDataset(dataset_size=dataset_size,
+                                     num_letters=num_letters,
+                                     max_input_len=max_input_len)
+    elif task == 'first':
+        dataset = TD.SelectTokenTaskDataset(dataset_size=dataset_size,
+                                            num_letters=num_letters,
+                                            max_input_len=max_input_len,
+                                            which_token='first')
+    elif task == 'last':
+        dataset = TD.SelectTokenTaskDataset(dataset_size=dataset_size,
+                                            num_letters=num_letters,
+                                            max_input_len=max_input_len,
+                                            which_token='last')
+    elif task == 'suffix-lookup':
+        dataset = TD.SuffixKeyLookupTaskDataset(dataset_size=dataset_size,
+                                                num_letters=num_letters,
+                                                max_input_len=max_input_len)
+    else:
+        raise NotImplementedError(f"task {task} not implemented")
+
+    for i in range(dataset_size):
+      x = dataset.__getitem__(i)
+    # TODO: stack data points x into a tensor of size (B, S, d)
+    # TODO: stack y into (B, C)
+    # TODO fix a positional encoding and token encoding
+    #
+    breakpoint()
+
+
+def main(*args, **kwargs) -> None:
   # Mask all padding with this value.
   mask_constant = 100.
-
-  if use_dummy_data:
-    x_train, y_train, x_test, y_test = _get_dummy_data(mask_constant)
-  else:
-    # Build data pipelines.
-    print('Loading IMDb data.')
-    x_train, y_train, x_test, y_test = datasets.get_dataset(
-        name='imdb_reviews',
-        n_train=_TRAIN_SIZE,
-        n_test=_TEST_SIZE,
-        do_flatten_and_normalize=False,
-        data_dir=_IMDB_PATH,
-        input_key='text')
-
-    # Embed words and pad / truncate sentences to a fixed size.
-    x_train, x_test = datasets.embed_glove(
-        xs=[x_train, x_test],
-        glove_path=_GLOVE_PATH,
-        max_sentence_length=_MAX_SENTENCE_LENGTH,
-        mask_constant=mask_constant)
+  get_task_data('first')
+  x_train, y_train, x_test, y_test = _get_dummy_data(mask_constant)
+  breakpoint()
 
   # Build the infinite network.
   # Not using the finite model, hence width is set to 1 everywhere.
   _, _, kernel_fn = stax.serial(
-      stax.Conv(out_chan=1, filter_shape=(9,), strides=(1,), padding='VALID'),
+      stax.Dense(out_dim=1),
       stax.Relu(),
       stax.GlobalSelfAttention(
           n_chan_out=1,
@@ -73,7 +86,7 @@ def main(*args, use_dummy_data: bool = False, **kwargs) -> None:
           pos_emb_decay_fn=lambda d: 1 / (1 + d**2),
           n_heads=1),
       stax.Relu(),
-      stax.GlobalAvgPool(),
+      # stax.GlobalAvgPool(),
       stax.Dense(out_dim=1)
   )
 
@@ -89,10 +102,10 @@ def main(*args, use_dummy_data: bool = False, **kwargs) -> None:
       diag_reg=1e-6,
       mask_constant=mask_constant)
 
-  fx_test_nngp = predict(x_test=x_test, get=('nngp'))
+  fx_test_nngp, fx_test_ntk = predict(x_test=x_test, get=('nngp'))
 
   fx_test_nngp.block_until_ready()
-  breakpoint()
+  fx_test_ntk.block_until_ready()
 
   duration = time.time() - start
   print(f'Kernel construction and inference done in {duration} seconds.')
@@ -100,6 +113,7 @@ def main(*args, use_dummy_data: bool = False, **kwargs) -> None:
   # Print out accuracy and loss for infinite network predictions.
   loss = lambda fx, y_hat: 0.5 * jnp.mean((fx - y_hat) ** 2)
   util.print_summary('NNGP test', y_test, fx_test_nngp, None, loss)
+  util.print_summary('NTK test', y_test, fx_test_ntk, None, loss)
 
 
 def _get_dummy_data(
